@@ -180,6 +180,11 @@ def main_loop():
 
         new_posts = [p for p in posts if not already_seen(conn, p["id"])]
 
+        if not posts:
+            print("No entries returned from feed this cycle.")
+        elif not new_posts:
+            print(f"Fetched {len(posts)} posts, 0 new (all already seen).")
+
         if first_cycle and BACKFILL_WITHOUT_SCREENING:
             # Mark the whole existing backlog as seen with zero Gemini calls.
             # Only posts published after this point will ever be screened.
@@ -210,6 +215,7 @@ def main_loop():
                 # pause between AI calls to stay safely under Gemini's free-tier RPM limit
                 time.sleep(6)
 
+        print(f"Cycle done. Sleeping {POLL_INTERVAL_SECONDS}s until next poll...")
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
