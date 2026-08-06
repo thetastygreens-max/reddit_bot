@@ -28,7 +28,7 @@ MULTIREDDIT = "+".join(s.strip() for s in SUBREDDITS)
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 )
 
 
@@ -158,8 +158,8 @@ def main_loop():
             if result.get("is_lead") and result.get("confidence", 0) >= 60:
                 send_telegram_alert(post)
 
-            # small pause between AI calls to stay under Gemini's free-tier rate limit
-            time.sleep(4)
+            # pause between AI calls to stay safely under Gemini's 15 RPM free-tier limit
+            time.sleep(6)
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
