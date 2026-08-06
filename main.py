@@ -112,30 +112,27 @@ def fetch_new_posts(max_retries=3):
 def is_video_editor_lead(title: str, body: str, max_retries=3) -> dict:
     """Ask Gemini whether this post is someone hiring/looking for a video editor."""
     
-    # Clean and escape the text to prevent unescaped quotes/newlines from breaking the JSON payload
-    clean_title = json.dumps(title)
-    clean_body = json.dumps(body[:1500])
-
-    prompt = f"""You are screening Reddit posts to find people who are HIRING or LOOKING FOR a video editor (freelance gig, paid job, or collaboration).
-
-Post title: {clean_title}
-Post body: {clean_body}
-
-Determine if this post is a hiring/lead post for a video editor.
-"""
+    # Simple prompt passing post title & body directly
+    prompt = (
+        "You are screening Reddit posts to find people who are HIRING or LOOKING FOR a video editor "
+        "(freelance gig, paid job, or collaboration).\n\n"
+        f"Post title: {title}\n"
+        f"Post body: {body[:1500]}\n\n"
+        "Determine if this post is a hiring/lead post for a video editor."
+    )
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0,
             "maxOutputTokens": 200,
-            "response_mime_type": "application/json",
-            "response_schema": {
-                "type": "OBJECT",
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
                 "properties": {
-                    "is_lead": {"type": "BOOLEAN"},
-                    "confidence": {"type": "INTEGER"},
-                    "reason": {"type": "STRING"}
+                    "is_lead": {"type": "boolean"},
+                    "confidence": {"type": "integer"},
+                    "reason": {"type": "string"}
                 },
                 "required": ["is_lead", "confidence", "reason"]
             }
@@ -151,7 +148,11 @@ Determine if this post is a hiring/lead post for a video editor.
                 time.sleep(wait)
                 continue
             
-            resp.raise_for_status()
+            # Print detailed API response if request fails
+            if resp.status_code != 200:
+                print(f"Gemini API Error [{resp.status_code}]: {resp.text}")
+                return {"is_lead": False, "confidence": 0, "reason": "api_error"}
+
             data = resp.json()
             text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             return json.loads(text)
@@ -161,7 +162,6 @@ Determine if this post is a hiring/lead post for a video editor.
 
     print("Gave up on this post after repeated Gemini 429s.")
     return {"is_lead": False, "confidence": 0, "reason": "rate_limited"}
-
 
 def send_telegram_alert(post):
     message = (
