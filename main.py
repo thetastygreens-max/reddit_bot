@@ -16,11 +16,16 @@ SUBREDDITS = os.environ.get(
     "forhire,slavelabour,videography,editors,editingrequests,VideoEditing"
 ).split(",")
 
-POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
+POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 DB_PATH = os.environ.get("DB_PATH", "seen_posts.db")
 
 # Reddit blocks requests without a real-looking User-Agent
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; editor-lead-bot/1.0)"}
+
+# Combine all subreddits into one multi-reddit feed URL, e.g. r/a+b+c/new/.rss
+# This means ONE request per poll cycle instead of one per subreddit,
+# which avoids Reddit's per-IP rate limiting (429 errors).
+MULTIREDDIT = "+".join(s.strip() for s in SUBREDDITS)
 
 claude = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -42,14 +47,29 @@ def mark_seen(conn, post_id):
     conn.commit()
 
 
-def fetch_new_posts(subreddit):
-    """Fetch newest posts from a subreddit's public RSS feed."""
-    url = f"https://www.reddit.com/r/{subreddit.strip()}/new/.rss"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
+def fetch_new_posts(max_retries=3):
+    """Fetch newest posts from all subreddits in a single combined RSS request.
+    Retries with backoff if Reddit returns 429 (Too Many Requests)."""
+    url = f"https://www.reddit.com/r/{MULTIREDDIT}/new/.rss"
+
+    for attempt in range(max_retries):
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 30)) * (attempt + 1)
+            print(f"Rate limited (429). Waiting {wait}s before retry...")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        break
+    else:
+        print("Gave up after repeated 429s this cycle.")
+        return []
+
     feed = feedparser.parse(resp.content)
     posts = []
     for entry in feed.entries:
+        # entry.link looks like https://www.reddit.com/r/forhire/comments/xyz/...
+        subreddit = entry.link.split("/r/")[1].split("/")[0] if "/r/" in entry.link else "unknown"
         posts.append({
             "id": entry.get("id", entry.get("link")),
             "title": entry.get("title", ""),
@@ -102,29 +122,25 @@ def send_telegram_alert(post):
 
 def main_loop():
     conn = init_db()
-    print(f"Monitoring (RSS): {', '.join(SUBREDDITS)}")
+    print(f"Monitoring (RSS, combined): {MULTIREDDIT}")
 
     while True:
-        for subreddit in SUBREDDITS:
-            try:
-                posts = fetch_new_posts(subreddit)
-            except Exception as e:
-                print(f"Error fetching r/{subreddit}: {e}")
+        try:
+            posts = fetch_new_posts()
+        except Exception as e:
+            print(f"Error fetching combined feed: {e}")
+            posts = []
+
+        for post in posts:
+            if already_seen(conn, post["id"]):
                 continue
+            mark_seen(conn, post["id"])
 
-            for post in posts:
-                if already_seen(conn, post["id"]):
-                    continue
-                mark_seen(conn, post["id"])
+            result = is_video_editor_lead(post["title"], post["content"])
+            print(f"[r/{post['subreddit']}] {post['title'][:60]} -> {result}")
 
-                result = is_video_editor_lead(post["title"], post["content"])
-                print(f"[r/{subreddit}] {post['title'][:60]} -> {result}")
-
-                if result.get("is_lead") and result.get("confidence", 0) >= 60:
-                    send_telegram_alert(post)
-
-            # small delay between subreddits to be polite to reddit.com
-            time.sleep(3)
+            if result.get("is_lead") and result.get("confidence", 0) >= 60:
+                send_telegram_alert(post)
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
