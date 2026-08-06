@@ -164,25 +164,35 @@ Determine if this post is a hiring/lead post for a video editor.
 
     print("Gave up on this post after repeated Gemini 429s.")
     return {"is_lead": False, "confidence": 0, "reason": "rate_limited"}
+import datetime
+
+def send_telegram_message(text: str):
+    """Utility to send any text message to Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    requests.post(url, data={
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    })
+
 def send_telegram_alert(post):
+    """Alert for a high-confidence video editing lead."""
     message = (
         f"🎬 *New video editor lead!*\n\n"
         f"*{post['title']}*\n\n"
         f"r/{post['subreddit']} | u/{post['author']}\n"
         f"{post['link']}"
     )
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, data={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False,
-    })
-
+    send_telegram_message(message)
 
 def main_loop():
     conn = init_db()
     print(f"Monitoring (RSS, combined): {MULTIREDDIT}")
+
+    # Buffer for posts evaluated in the last 5 minutes:
+    # stores dicts of {"title": str, "subreddit": str, "timestamp": float}
+    scanned_recent_posts = []
 
     first_cycle = db_is_empty(conn)
     if first_cycle and BACKFILL_WITHOUT_SCREENING:
@@ -204,38 +214,63 @@ def main_loop():
             print(f"Fetched {len(posts)} posts, 0 new (all already seen).")
 
         if first_cycle and BACKFILL_WITHOUT_SCREENING:
-            # Mark the whole existing backlog as seen with zero Gemini calls.
-            # Only posts published after this point will ever be screened.
             for post in new_posts:
                 mark_seen(conn, post["id"])
-            print(f"Backfilled {len(new_posts)} existing posts as seen "
-                  f"(0 Gemini calls used).")
+            print(f"Backfilled {len(new_posts)} existing posts as seen (0 Gemini calls used).")
             first_cycle = False
         else:
             screened = 0
+            found_lead_this_cycle = False
+
             for post in new_posts:
                 mark_seen(conn, post["id"])
 
                 if screened >= MAX_AI_CALLS_PER_CYCLE:
-                    # Rate-limit safety valve: leave remaining posts for
-                    # future cycles instead of bursting past the quota.
-                    print(f"Hit MAX_AI_CALLS_PER_CYCLE ({MAX_AI_CALLS_PER_CYCLE}); "
-                          f"skipping AI screening for the rest of this cycle.")
+                    print(f"Hit MAX_AI_CALLS_PER_CYCLE ({MAX_AI_CALLS_PER_CYCLE}); skipping rest.")
                     break
 
                 result = is_video_editor_lead(post["title"], post["content"])
                 print(f"[r/{post['subreddit']}] {post['title'][:60]} -> {result}")
                 screened += 1
 
+                # Track this scanned post timestamp for 5-min history
+                scanned_recent_posts.append({
+                    "title": post["title"],
+                    "subreddit": post["subreddit"],
+                    "timestamp": time.time()
+                })
+
                 if result.get("is_lead") and result.get("confidence", 0) >= 60:
+                    found_lead_this_cycle = True
                     send_telegram_alert(post)
 
-                # pause between AI calls to stay safely under Gemini's free-tier RPM limit
                 time.sleep(6)
+
+            # Purge entries older than 5 minutes (300 seconds)
+            cutoff_time = time.time() - 300
+            scanned_recent_posts = [
+                p for p in scanned_recent_posts if p["timestamp"] >= cutoff_time
+            ]
+
+            # Test notification: Send status update if no lead was found
+            if not found_lead_this_cycle:
+                if scanned_recent_posts:
+                    post_list = "\n".join([
+                        f"• `[r/{p['subreddit']}]` {p['title'][:50]}" 
+                        for p in scanned_recent_posts
+                    ])
+                    summary_msg = (
+                        "scanned these leads but none found to be worth it:\n\n"
+                        f"{post_list}"
+                    )
+                else:
+                    summary_msg = "scanned these leads but none found to be worth it (0 new posts evaluated in last 5 min)."
+
+                # Enforce Telegram 4096 character limit safety margin
+                if len(summary_msg) > 4000:
+                    summary_msg = summary_msg[:3990] + "\n..."
+
+                send_telegram_message(summary_msg)
 
         print(f"Cycle done. Sleeping {POLL_INTERVAL_SECONDS}s until next poll...")
         time.sleep(POLL_INTERVAL_SECONDS)
-
-
-if __name__ == "__main__":
-    main_loop()
