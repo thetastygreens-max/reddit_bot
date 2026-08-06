@@ -83,8 +83,9 @@ def fetch_new_posts(max_retries=3):
     return posts
 
 
-def is_video_editor_lead(title: str, body: str) -> dict:
-    """Ask Gemini (free tier) whether this post is someone hiring/looking for a video editor."""
+def is_video_editor_lead(title: str, body: str, max_retries=3) -> dict:
+    """Ask Gemini (free tier) whether this post is someone hiring/looking for a video editor.
+    Retries with backoff if Gemini's per-minute rate limit is hit."""
     prompt = f"""You are screening Reddit posts to find people who are HIRING or LOOKING FOR a video editor (freelance gig, paid job, or collaboration).
 
 Post title: {title}
@@ -97,16 +98,26 @@ Reply with ONLY a JSON object, no other text, in this exact format:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 200},
     }
-    try:
-        resp = requests.post(GEMINI_URL, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception as e:
-        print(f"Gemini call failed: {e}")
-        return {"is_lead": False, "confidence": 0, "reason": "api_error"}
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(GEMINI_URL, json=payload, timeout=30)
+            if resp.status_code == 429:
+                wait = 20 * (attempt + 1)
+                print(f"Gemini rate limited (429). Waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            text = text.replace("```json", "").replace("```", "").strip()
+            return json.loads(text)
+        except Exception as e:
+            print(f"Gemini call failed: {e}")
+            return {"is_lead": False, "confidence": 0, "reason": "api_error"}
+
+    print("Gave up on this post after repeated Gemini 429s.")
+    return {"is_lead": False, "confidence": 0, "reason": "rate_limited"}
 
 
 def send_telegram_alert(post):
@@ -146,6 +157,9 @@ def main_loop():
 
             if result.get("is_lead") and result.get("confidence", 0) >= 60:
                 send_telegram_alert(post)
+
+            # small pause between AI calls to stay under Gemini's free-tier rate limit
+            time.sleep(4)
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
