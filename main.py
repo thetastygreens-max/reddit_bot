@@ -4,12 +4,11 @@ import json
 import sqlite3
 import requests
 import feedparser
-from anthropic import Anthropic
 
 # ---- Config from environment variables ----
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 SUBREDDITS = os.environ.get(
     "SUBREDDITS",
@@ -27,7 +26,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; editor-lead-bot/1.0)"}
 # which avoids Reddit's per-IP rate limiting (429 errors).
 MULTIREDDIT = "+".join(s.strip() for s in SUBREDDITS)
 
-claude = Anthropic(api_key=ANTHROPIC_API_KEY)
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+)
 
 
 def init_db():
@@ -82,7 +84,7 @@ def fetch_new_posts(max_retries=3):
 
 
 def is_video_editor_lead(title: str, body: str) -> dict:
-    """Ask Claude whether this post is someone hiring/looking for a video editor."""
+    """Ask Gemini (free tier) whether this post is someone hiring/looking for a video editor."""
     prompt = f"""You are screening Reddit posts to find people who are HIRING or LOOKING FOR a video editor (freelance gig, paid job, or collaboration).
 
 Post title: {title}
@@ -91,17 +93,20 @@ Post body (may include HTML): {body[:2000]}
 Reply with ONLY a JSON object, no other text, in this exact format:
 {{"is_lead": true or false, "confidence": 0-100, "reason": "one short sentence why"}}
 """
-    response = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=200,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = response.content[0].text.strip()
-    text = text.replace("```json", "").replace("```", "").strip()
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 200},
+    }
     try:
+        resp = requests.post(GEMINI_URL, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        text = text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
-    except json.JSONDecodeError:
-        return {"is_lead": False, "confidence": 0, "reason": "parse_error"}
+    except Exception as e:
+        print(f"Gemini call failed: {e}")
+        return {"is_lead": False, "confidence": 0, "reason": "api_error"}
 
 
 def send_telegram_alert(post):
