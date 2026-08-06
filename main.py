@@ -72,7 +72,7 @@ Reply with ONLY a JSON object, no other text, in this exact format:
 {{"is_lead": true or false, "confidence": 0-100, "reason": "one short sentence why"}}
 """
     response = claude.messages.create(
-        model="claude-3-5-sonnet-latest",
+        model="claude-sonnet-4-6",
         max_tokens=200,
         messages=[{"role": "user", "content": prompt}],
     )
