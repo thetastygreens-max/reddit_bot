@@ -28,8 +28,15 @@ MULTIREDDIT = "+".join(s.strip() for s in SUBREDDITS)
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    "gemini-2.5-flash:generateContent"
 )
+# Auth (AQ.*) keys must be sent as a header, not a ?key= query param.
+# Standard (AIzaSy...) keys also work fine with this header, so this
+# is the safe, forward-compatible way to authenticate either type.
+GEMINI_HEADERS = {
+    "Content-Type": "application/json",
+    "x-goog-api-key": GEMINI_API_KEY,
+}
 
 
 def init_db():
@@ -101,7 +108,7 @@ Reply with ONLY a JSON object, no other text, in this exact format:
 
     for attempt in range(max_retries):
         try:
-            resp = requests.post(GEMINI_URL, json=payload, timeout=30)
+            resp = requests.post(GEMINI_URL, headers=GEMINI_HEADERS, json=payload, timeout=30)
             if resp.status_code == 429:
                 wait = 20 * (attempt + 1)
                 print(f"Gemini rate limited (429). Waiting {wait}s...")
