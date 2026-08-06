@@ -18,6 +18,19 @@ SUBREDDITS = os.environ.get(
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 DB_PATH = os.environ.get("DB_PATH", "seen_posts.db")
 
+# Safety valve so a big backlog (first run, or a wiped DB) can't blow through
+# your Gemini rate limit in one cycle. Only this many posts get AI-screened
+# per poll; the rest are just marked seen and picked up as "new" never again
+# (they'll simply be skipped, not screened later).
+MAX_AI_CALLS_PER_CYCLE = int(os.environ.get("MAX_AI_CALLS_PER_CYCLE", "5"))
+
+# On the very first run (empty DB), the whole current backlog looks "new."
+# Screening all of it with Gemini immediately is what blows the rate limit
+# before you've even confirmed the pipeline works. If true (default),
+# the first cycle only marks posts as seen -- no Gemini calls, no alerts --
+# so testing starts clean and only genuinely new posts going forward get screened.
+BACKFILL_WITHOUT_SCREENING = os.environ.get("BACKFILL_WITHOUT_SCREENING", "true").lower() == "true"
+
 # Reddit blocks requests without a real-looking User-Agent
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; editor-lead-bot/1.0)"}
 
@@ -26,9 +39,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; editor-lead-bot/1.0)"}
 # which avoids Reddit's per-IP rate limiting (429 errors).
 MULTIREDDIT = "+".join(s.strip() for s in SUBREDDITS)
 
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
+    f"{GEMINI_MODEL}:generateContent"
 )
 # Auth (AQ.*) keys must be sent as a header, not a ?key= query param.
 # Standard (AIzaSy...) keys also work fine with this header, so this
@@ -44,6 +58,11 @@ def init_db():
     conn.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)")
     conn.commit()
     return conn
+
+
+def db_is_empty(conn):
+    cur = conn.execute("SELECT 1 FROM seen LIMIT 1")
+    return cur.fetchone() is None
 
 
 def already_seen(conn, post_id):
@@ -147,6 +166,11 @@ def main_loop():
     conn = init_db()
     print(f"Monitoring (RSS, combined): {MULTIREDDIT}")
 
+    first_cycle = db_is_empty(conn)
+    if first_cycle and BACKFILL_WITHOUT_SCREENING:
+        print("Empty DB detected -> backfilling current backlog without AI "
+              "screening (set BACKFILL_WITHOUT_SCREENING=false to disable).")
+
     while True:
         try:
             posts = fetch_new_posts()
@@ -154,19 +178,37 @@ def main_loop():
             print(f"Error fetching combined feed: {e}")
             posts = []
 
-        for post in posts:
-            if already_seen(conn, post["id"]):
-                continue
-            mark_seen(conn, post["id"])
+        new_posts = [p for p in posts if not already_seen(conn, p["id"])]
 
-            result = is_video_editor_lead(post["title"], post["content"])
-            print(f"[r/{post['subreddit']}] {post['title'][:60]} -> {result}")
+        if first_cycle and BACKFILL_WITHOUT_SCREENING:
+            # Mark the whole existing backlog as seen with zero Gemini calls.
+            # Only posts published after this point will ever be screened.
+            for post in new_posts:
+                mark_seen(conn, post["id"])
+            print(f"Backfilled {len(new_posts)} existing posts as seen "
+                  f"(0 Gemini calls used).")
+            first_cycle = False
+        else:
+            screened = 0
+            for post in new_posts:
+                mark_seen(conn, post["id"])
 
-            if result.get("is_lead") and result.get("confidence", 0) >= 60:
-                send_telegram_alert(post)
+                if screened >= MAX_AI_CALLS_PER_CYCLE:
+                    # Rate-limit safety valve: leave remaining posts for
+                    # future cycles instead of bursting past the quota.
+                    print(f"Hit MAX_AI_CALLS_PER_CYCLE ({MAX_AI_CALLS_PER_CYCLE}); "
+                          f"skipping AI screening for the rest of this cycle.")
+                    break
 
-            # pause between AI calls to stay safely under Gemini's 15 RPM free-tier limit
-            time.sleep(6)
+                result = is_video_editor_lead(post["title"], post["content"])
+                print(f"[r/{post['subreddit']}] {post['title'][:60]} -> {result}")
+                screened += 1
+
+                if result.get("is_lead") and result.get("confidence", 0) >= 60:
+                    send_telegram_alert(post)
+
+                # pause between AI calls to stay safely under Gemini's free-tier RPM limit
+                time.sleep(6)
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
