@@ -110,19 +110,36 @@ def fetch_new_posts(max_retries=3):
 
 
 def is_video_editor_lead(title: str, body: str, max_retries=3) -> dict:
-    """Ask Gemini (free tier) whether this post is someone hiring/looking for a video editor.
-    Retries with backoff if Gemini's per-minute rate limit is hit."""
+    """Ask Gemini whether this post is someone hiring/looking for a video editor."""
+    
+    # Clean and escape the text to prevent unescaped quotes/newlines from breaking the JSON payload
+    clean_title = json.dumps(title)
+    clean_body = json.dumps(body[:1500])
+
     prompt = f"""You are screening Reddit posts to find people who are HIRING or LOOKING FOR a video editor (freelance gig, paid job, or collaboration).
 
-Post title: {title}
-Post body (may include HTML): {body[:2000]}
+Post title: {clean_title}
+Post body: {clean_body}
 
-Reply with ONLY a JSON object, no other text, in this exact format:
-{{"is_lead": true or false, "confidence": 0-100, "reason": "one short sentence why"}}
+Determine if this post is a hiring/lead post for a video editor.
 """
+
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 200},
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 200,
+            "response_mime_type": "application/json",
+            "response_schema": {
+                "type": "OBJECT",
+                "properties": {
+                    "is_lead": {"type": "BOOLEAN"},
+                    "confidence": {"type": "INTEGER"},
+                    "reason": {"type": "STRING"}
+                },
+                "required": ["is_lead", "confidence", "reason"]
+            }
+        },
     }
 
     for attempt in range(max_retries):
@@ -133,10 +150,10 @@ Reply with ONLY a JSON object, no other text, in this exact format:
                 print(f"Gemini rate limited (429). Waiting {wait}s...")
                 time.sleep(wait)
                 continue
+            
             resp.raise_for_status()
             data = resp.json()
             text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            text = text.replace("```json", "").replace("```", "").strip()
             return json.loads(text)
         except Exception as e:
             print(f"Gemini call failed: {e}")
